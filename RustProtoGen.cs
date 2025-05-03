@@ -9,7 +9,7 @@ using HarmonyLib;
 
 namespace Oxide.Plugins
 {
-    [Info("RustProtoGen", "SegFault", "1.0.1")]
+    [Info("RustProtoGen", "SegFault", "1.0.2")]
     [Description("Generates a .proto file for Rust+ from reversing the Rust.Data.dll")]
     public class RustProtoGen : CSharpPlugin
     {
@@ -57,11 +57,20 @@ namespace Oxide.Plugins
                 Puts("AppMessage type not found in Rust.Data");
                 return;
             }
+            
+            var appRequestType = rustAsm.GetTypes()
+                .FirstOrDefault(t => t.Name == "AppRequest" && t.Namespace == "ProtoBuf");
+            if (appRequestType == null)
+            {
+                Puts("AppRequest type not found in Rust.Data");
+                return;
+            }
 
             procTypes.Clear();
             typesToProc.Clear();
             
             CollectTypes(appMsgType);
+            CollectTypes(appRequestType);
 
             var typeResults = new List<string>();
 
@@ -71,6 +80,14 @@ namespace Oxide.Plugins
                 GenMsg(appMsgType, 0, sb);
                 typeResults.Add(sb.ToString().TrimEnd());
                 typesToProc.Remove(appMsgType.FullName);
+            }
+            
+            if (typesToProc.Contains(appRequestType.FullName))
+            {
+                var sb = new StringBuilder();
+                GenMsg(appRequestType, 0, sb);
+                typeResults.Add(sb.ToString().TrimEnd());
+                typesToProc.Remove(appRequestType.FullName);
             }
 
             foreach (var typeName in typesToProc.OrderBy(t => t))
@@ -298,14 +315,15 @@ namespace Oxide.Plugins
             }
 
             if (type == typeof(int)) return "int32";
-            if (type == typeof(long)) return "int64";
-            if (type == typeof(uint)) return "uint32";
-            if (type == typeof(ulong)) return "uint64";
-            if (type == typeof(float)) return "float";
-            if (type == typeof(double)) return "double";
-            if (type == typeof(bool)) return "bool";
-            if (type == typeof(string)) return "string";
-            if (type == typeof(byte[])) return "bytes";
+            else if (type == typeof(long)) return "int64";
+            else if (type == typeof(uint)) return "uint32";
+            else if (type == typeof(ulong)) return "uint64";
+            else if (type == typeof(float)) return "float";
+            else if (type == typeof(double)) return "double";
+            else if (type == typeof(bool)) return "bool";
+            else if (type == typeof(string)) return "string";
+            else if (type == typeof(byte[])) return "bytes";
+            else if (type == typeof(ArraySegment<byte>)) return "bytes";
 
             if (type.Namespace == "ProtoBuf" ||
                 type.GetInterfaces().Any(i => i.Name == "IProto" || i.Name == "IProto`1") ||
@@ -315,18 +333,28 @@ namespace Oxide.Plugins
                 {
                     typesToProc.Add(type.FullName);
                 }
-                if (type.DeclaringType != null && type.DeclaringType == parent)
+                
+                if (type.DeclaringType != null)
                 {
-                    return type.Name;
+                    var parentType = type.DeclaringType;
+                    if (parentType == parent)
+                    {
+                        return $"{parentType.Name}.{type.Name}";
+                    }
+                    else
+                    {
+                        var scope = type;
+                        var typeName = type.Name;
+                        while (scope.DeclaringType != null)
+                        {
+                            scope = scope.DeclaringType;
+                            typeName = $"{scope.Name}.{typeName}";
+                        }
+                        return typeName;
+                    }
                 }
-                var scope = type;
-                var typeName = type.Name;
-                while (scope.DeclaringType != null)
-                {
-                    scope = scope.DeclaringType;
-                    typeName = $"{scope.Name}.{typeName}";
-                }
-                return typeName;
+                
+                return type.Name;
             }
 
             return "string";

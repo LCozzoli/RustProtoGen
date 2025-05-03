@@ -115,7 +115,7 @@ namespace Oxide.Plugins
             typesToProc.Add(type.FullName);
 
             var nestedTypes = type.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
-                .Where(t => t.GetInterfaces().Any(i => i.Name == "IProto") || t.IsEnum)
+                .Where(t => t.GetInterfaces().Any(i => i.Name == "IProto" || i.Name == "IProto`1") || t.IsEnum)
                 .ToList();
             foreach (var nested in nestedTypes)
             {
@@ -182,7 +182,7 @@ namespace Oxide.Plugins
             }
 
             var nested = type.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
-                .Where(t => t.GetInterfaces().Any(i => i.Name == "IProto") || t.IsEnum)
+                .Where(t => t.GetInterfaces().Any(i => i.Name == "IProto" || i.Name == "IProto`1") || t.IsEnum)
                 .ToList();
 
             if (nested.Any())
@@ -308,7 +308,7 @@ namespace Oxide.Plugins
             if (type == typeof(byte[])) return "bytes";
 
             if (type.Namespace == "ProtoBuf" ||
-                type.GetInterfaces().Any(i => i.Name == "IProto") ||
+                type.GetInterfaces().Any(i => i.Name == "IProto" || i.Name == "IProto`1") ||
                 type.IsEnum)
             {
                 if (!procTypes.Contains(type.FullName) && !typesToProc.Contains(type.FullName))

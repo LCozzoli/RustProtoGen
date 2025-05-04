@@ -9,7 +9,7 @@ using HarmonyLib;
 
 namespace Oxide.Plugins
 {
-    [Info("RustProtoGen", "SegFault", "1.0.3")]
+    [Info("RustProtoGen", "SegFault", "1.0.4")]
     [Description("Generates a .proto file for Rust+ from reversing the Rust.Data.dll")]
     public class RustProtoGen : CSharpPlugin
     {
@@ -41,6 +41,7 @@ namespace Oxide.Plugins
         {
             try
             {
+                Puts("Starting protobuf generation...");
                 GenProtoFile();
                 Puts("Protobuf generation completed. Check " + OutPath);
             }
@@ -49,6 +50,8 @@ namespace Oxide.Plugins
                 Puts($"Error during protobuf generation: {ex.Message}");
                 if (ex.InnerException != null)
                     Puts($"Inner exception: {ex.InnerException.Message}");
+                if (ex.StackTrace != null)
+                    Puts($"Stack trace: {ex.StackTrace}");
             }
         }
         
@@ -111,8 +114,7 @@ namespace Oxide.Plugins
 
             foreach (var typeName in typesToProc.OrderBy(t => t))
             {
-                var type = rustAsm.GetTypes()
-                    .FirstOrDefault(t => t.FullName == typeName);
+                var type = rustAsm.GetType(typeName);
                 if (type == null)
                 {
                     Puts($"Warning: Type {typeName} not found");
@@ -211,11 +213,10 @@ namespace Oxide.Plugins
         {
             if (procTypes.Contains(type.FullName))
                 return;
-
-            Puts($"{new string(' ', indent * 2)}Generating message: {type.Name}");
             
+            Puts($"Generating message: {type.Name}");
             procTypes.Add(type.FullName);
-            string indentStr = new string(' ', indent * 2);
+            string indentStr = new string('\t', indent);
             sb.AppendLine($"{indentStr}message {type.Name} {{");
             indent++;
 
@@ -229,13 +230,15 @@ namespace Oxide.Plugins
             var optionalFields = DetectOptionalFields(type);
             var requiredFields = FindRequiredFields(type);
             
+            Puts($"Found {members.Count} members in {type.Name}");
+            
             int fieldNum = 1;
             foreach (var mem in members)
             {
                 var protoType = MapType(mem.Type, type);
                 bool isOpt = optionalFields.Contains(mem.Name) && !requiredFields.Contains(mem.Name);
                 string opt = isOpt ? "optional " : "";
-                sb.AppendLine($"{indentStr}  {opt}{protoType} {mem.Name} = {fieldNum};");
+                sb.AppendLine($"{indentStr}\t{opt}{protoType} {mem.Name} = {fieldNum};");
                 fieldNum++;
             }
 
@@ -245,8 +248,7 @@ namespace Oxide.Plugins
 
             if (nested.Any())
             {
-                Puts($"{new string(' ', indent * 2)}Found {nested.Count} nested types in {type.Name}");
-                
+                Puts($"Found {nested.Count} nested types in {type.Name}");
                 sb.AppendLine();
                 
                 var nestedOrdered = nested.OrderBy(t => t.Name).ToList();
@@ -274,20 +276,20 @@ namespace Oxide.Plugins
         {
             if (procTypes.Contains(type.FullName))
                 return;
-
-            Puts($"{new string(' ', indent * 2)}Generating enum: {type.Name}");
             
+            Puts($"Generating enum: {type.Name}");
             procTypes.Add(type.FullName);
-            string indentStr = new string(' ', indent * 2);
+            string indentStr = new string('\t', indent);
             sb.AppendLine($"{indentStr}enum {type.Name} {{");
             indent++;
 
             var names = Enum.GetNames(type);
             var values = Enum.GetValues(type).Cast<int>().ToArray();
             
+            Puts($"Found {names.Length} values in enum {type.Name}");
             for (int i = 0; i < names.Length; i++)
             {
-                sb.AppendLine($"{indentStr}  {names[i]} = {values[i]};");
+                sb.AppendLine($"{indentStr}\t{names[i]} = {values[i]};");
             }
 
             indent--;
@@ -302,10 +304,7 @@ namespace Oxide.Plugins
                 .FirstOrDefault(m => m.Name == "ResetToPool" && m.GetParameters().Length == 1 && 
                                    m.GetParameters()[0].ParameterType == type);
             if (resetMethod == null)
-            {
-                Puts($"Warning: ResetToPool method not found for {type.Name}");
                 return optFields;
-            }
 
             try
             {
@@ -349,18 +348,6 @@ namespace Oxide.Plugins
                 Puts($"Error detecting optional fields in ResetToPool for {type.Name}: {ex.Message}");
             }
 
-            foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
-            {
-                if (field.FieldType.IsClass || 
-                    field.FieldType.IsInterface || 
-                    Nullable.GetUnderlyingType(field.FieldType) != null || 
-                    field.FieldType.IsGenericType || 
-                    field.FieldType.IsArray)
-                {
-                    optFields.Add(field.Name);
-                }
-            }
-
             optFields.Remove("ShouldPool");
 
             return optFields;
@@ -370,91 +357,74 @@ namespace Oxide.Plugins
         {
             var requiredFields = new HashSet<string>();
             
-            var serMethod = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                .FirstOrDefault(m => m.Name == "Serialize" && 
-                                   m.GetParameters().Any(p => p.ParameterType.Name.Contains("BufferStream")));
+            var serializeMethods = new List<MethodInfo>();
             
-            if (serMethod == null)
+            var instanceMethod = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "Serialize" && 
+                                  m.GetParameters().Any(p => p.ParameterType.Name.Contains("BufferStream")));
+            if (instanceMethod != null)
+                serializeMethods.Add(instanceMethod);
+            
+            var staticMethods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(m => m.Name == "Serialize" && 
+                         m.GetParameters().Length >= 2 &&
+                         m.GetParameters()[0].ParameterType.Name.Contains("BufferStream") &&
+                         m.GetParameters()[1].ParameterType == type)
+                .ToList();
+            if (staticMethods.Any())
+                serializeMethods.AddRange(staticMethods);
+                
+            if (!serializeMethods.Any())
                 return requiredFields;
                 
-            try
+            foreach (var serMethod in serializeMethods)
             {
-                var instrs = PatchProcessor.GetCurrentInstructions(serMethod);
-                var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance)
-                    .ToDictionary(f => f.Name, f => f);
-                
-                string currentField = null;
-                bool inThrowBlock = false;
-                bool hasRequiredMessage = false;
-                
-                for (int i = 0; i < instrs.Count; i++)
+                try
                 {
-                    var instr = instrs[i];
+                    var instrs = PatchProcessor.GetCurrentInstructions(serMethod);
+                    if (instrs == null || instrs.Count == 0)
+                        continue;
                     
-                    if (instr.opcode == System.Reflection.Emit.OpCodes.Ldarg_0 && i + 1 < instrs.Count)
+                    for (int i = 0; i < instrs.Count; i++)
                     {
-                        if (instrs[i + 1].opcode == System.Reflection.Emit.OpCodes.Ldfld &&
-                            instrs[i + 1].operand is FieldInfo fieldInfo && 
-                            fields.ContainsKey(fieldInfo.Name))
+                        var instr = instrs[i];
+                        if (instr.opcode == System.Reflection.Emit.OpCodes.Newobj && 
+                            instr.operand is ConstructorInfo ctor && 
+                            ctor.DeclaringType.Name == "ArgumentNullException")
                         {
-                            currentField = fieldInfo.Name;
+                            string fieldName = null;
+                            bool hasRequiredMessage = false;
+                            
+                            for (int j = i - 1; j >= Math.Max(0, i - 10); j--)
+                            {
+                                if (instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldstr)
+                                {
+                                    string stringValue = instrs[j].operand as string;
+                                    if (stringValue != null)
+                                    {
+                                        if (stringValue == "Required by proto specification.")
+                                        {
+                                            hasRequiredMessage = true;
+                                        }
+                                        else if (fieldName == null && stringValue.Length > 0)
+                                        {
+                                            fieldName = stringValue;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if (fieldName != null && hasRequiredMessage)
+                            {
+                                requiredFields.Add(fieldName);
+                            }
                         }
-                    }
-                    
-                    if (currentField != null && 
-                        (instr.opcode == System.Reflection.Emit.OpCodes.Brfalse || 
-                         instr.opcode == System.Reflection.Emit.OpCodes.Brfalse_S ||
-                         instr.opcode == System.Reflection.Emit.OpCodes.Brtrue ||
-                         instr.opcode == System.Reflection.Emit.OpCodes.Brtrue_S))
-                    {
-                        inThrowBlock = true;
-                    }
-                    
-                    if (inThrowBlock && instr.opcode == System.Reflection.Emit.OpCodes.Ldstr)
-                    {
-                        string stringOperand = instr.operand as string;
-                        if (stringOperand != null && 
-                             stringOperand.Contains("Required by proto"))
-                        {
-                            hasRequiredMessage = true;
-                        }
-                    }
-                    
-                    if (inThrowBlock && (
-                        instr.opcode == System.Reflection.Emit.OpCodes.Throw ||
-                        (instr.opcode == System.Reflection.Emit.OpCodes.Newobj && 
-                         instr.operand is ConstructorInfo ctor && 
-                         (ctor.DeclaringType.Name.Contains("ArgumentException") || 
-                          ctor.DeclaringType.Name.Contains("NullReferenceException") ||
-                          ctor.DeclaringType.Name.Contains("Exception")))))
-                    {
-                        if (currentField != null && (hasRequiredMessage || 
-                            (instr.opcode == System.Reflection.Emit.OpCodes.Newobj && 
-                             instr.operand is ConstructorInfo ctorCheck && 
-                             ctorCheck.DeclaringType.Name.Contains("ArgumentNullException"))))
-                        {
-                            requiredFields.Add(currentField);
-                        }
-                        inThrowBlock = false;
-                        hasRequiredMessage = false;
-                        currentField = null;
-                    }
-                    
-                    if (instr.opcode == System.Reflection.Emit.OpCodes.Call || 
-                        instr.opcode == System.Reflection.Emit.OpCodes.Callvirt ||
-                        (instr.opcode.Name.StartsWith("br") && 
-                         !instr.opcode.Name.StartsWith("brfalse") && 
-                         !instr.opcode.Name.StartsWith("brtrue")))
-                    {
-                        inThrowBlock = false;
-                        hasRequiredMessage = false;
-                        currentField = null;
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                Puts($"Error detecting required fields in Serialize for {type.Name}: {ex.Message}");
+                catch (Exception ex)
+                {
+                    Puts($"Error analyzing {serMethod.Name} for type {type.Name}: {ex.Message}");
+                }
             }
             
             return requiredFields;

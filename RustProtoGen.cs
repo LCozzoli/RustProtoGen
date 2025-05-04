@@ -9,7 +9,7 @@ using HarmonyLib;
 
 namespace Oxide.Plugins
 {
-    [Info("RustProtoGen", "SegFault", "1.0.2")]
+    [Info("RustProtoGen", "SegFault", "1.0.3")]
     [Description("Generates a .proto file for Rust+ from reversing the Rust.Data.dll")]
     public class RustProtoGen : CSharpPlugin
     {
@@ -19,6 +19,23 @@ namespace Oxide.Plugins
         private readonly HashSet<string> procTypes = new HashSet<string>();
         private readonly HashSet<string> typesToProc = new HashSet<string>();
         private Assembly rustAsm;
+        private readonly Dictionary<Type, string> typeMap = new Dictionary<Type, string>{
+            { typeof(int), "int32" },
+            { typeof(long), "int64" },
+            { typeof(uint), "uint32" },
+            { typeof(ulong), "uint64" },
+            { typeof(float), "float" },
+            { typeof(double), "double" },
+            { typeof(bool), "bool" },
+            { typeof(string), "string" },
+            { typeof(byte[]), "bytes" },
+            { typeof(NetworkableId), "uint32" },
+            { typeof(ArraySegment<byte>), "bytes" },
+            { typeof(UnityEngine.Vector2), "Vector2" },
+            { typeof(UnityEngine.Vector3), "Vector3" },
+            { typeof(UnityEngine.Vector4), "Vector4" },
+            { typeof(System.Byte), "bytes" },
+        };
 
         void Init()
         {
@@ -49,6 +66,8 @@ namespace Oxide.Plugins
             proto.AppendLine("syntax = \"proto3\";");
             proto.AppendLine("package rustplus;");
             proto.AppendLine();
+            
+            AddVectorDefinitions();
 
             var appMsgType = rustAsm.GetTypes()
                 .FirstOrDefault(t => t.Name == "AppMessage" && t.Namespace == "ProtoBuf");
@@ -123,6 +142,27 @@ namespace Oxide.Plugins
                 Puts($"Failed to write proto file: {ex.Message}");
             }
         }
+        
+        void AddVectorDefinitions()
+        {
+            var vectors = new[]
+            {
+                new { Name = "Vector2", Fields = new[] { "x", "y" } },
+                new { Name = "Vector3", Fields = new[] { "x", "y", "z" } },
+                new { Name = "Vector4", Fields = new[] { "x", "y", "z", "w" } }
+            };
+            
+            foreach (var vector in vectors)
+            {
+                proto.AppendLine($"message {vector.Name} {{");
+                for (int i = 0; i < vector.Fields.Length; i++)
+                {
+                    proto.AppendLine($"\tfloat {vector.Fields[i]} = {i + 1};");
+                }
+                proto.AppendLine("}");
+                proto.AppendLine();
+            }
+        }
 
         void CollectTypes(Type type)
         {
@@ -187,12 +227,13 @@ namespace Oxide.Plugins
                 .ToList();
 
             var optionalFields = DetectOptionalFields(type);
+            var requiredFields = FindRequiredFields(type);
             
             int fieldNum = 1;
             foreach (var mem in members)
             {
                 var protoType = MapType(mem.Type, type);
-                bool isOpt = optionalFields.Contains(mem.Name);
+                bool isOpt = optionalFields.Contains(mem.Name) && !requiredFields.Contains(mem.Name);
                 string opt = isOpt ? "optional " : "";
                 sb.AppendLine($"{indentStr}  {opt}{protoType} {mem.Name} = {fieldNum};");
                 fieldNum++;
@@ -257,16 +298,18 @@ namespace Oxide.Plugins
         {
             var optFields = new HashSet<string>();
 
-            var serMethod = type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance)
-                .FirstOrDefault(m => m.Name == "Serialize" && m.GetParameters().Any(p => p.ParameterType.Name.Contains("BufferStream")));
-            if (serMethod == null)
+            var resetMethod = type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic)
+                .FirstOrDefault(m => m.Name == "ResetToPool" && m.GetParameters().Length == 1 && 
+                                   m.GetParameters()[0].ParameterType == type);
+            if (resetMethod == null)
             {
+                Puts($"Warning: ResetToPool method not found for {type.Name}");
                 return optFields;
             }
 
             try
             {
-                var instrs = PatchProcessor.GetCurrentInstructions(serMethod);
+                var instrs = PatchProcessor.GetCurrentInstructions(resetMethod);
                 var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance)
                     .ToDictionary(f => f.Name, f => f);
 
@@ -276,29 +319,145 @@ namespace Oxide.Plugins
                 {
                     var instr = instrs[i];
 
-                    if (instr.opcode == System.Reflection.Emit.OpCodes.Ldfld &&
-                        instr.operand is FieldInfo fieldInfo && fields.ContainsKey(fieldInfo.Name))
+                    if (instr.opcode == System.Reflection.Emit.OpCodes.Ldarg_0 || 
+                        instr.opcode == System.Reflection.Emit.OpCodes.Ldarg_1)
                     {
-                        currentField = fieldInfo.Name;
+                        if (i + 1 < instrs.Count && 
+                            instrs[i + 1].opcode == System.Reflection.Emit.OpCodes.Ldfld &&
+                            instrs[i + 1].operand is FieldInfo fieldInfo && 
+                            fields.ContainsKey(fieldInfo.Name))
+                        {
+                            currentField = fieldInfo.Name;
+                        }
                     }
 
-                    if (currentField != null && (
-                        instr.opcode == System.Reflection.Emit.OpCodes.Brfalse ||
-                        instr.opcode == System.Reflection.Emit.OpCodes.Brfalse_S ||
-                        instr.opcode == System.Reflection.Emit.OpCodes.Brtrue ||
-                        instr.opcode == System.Reflection.Emit.OpCodes.Beq_S))
+                    if (currentField != null && 
+                        instr.opcode == System.Reflection.Emit.OpCodes.Stfld && 
+                        instr.operand is FieldInfo storeField && 
+                        storeField.Name == currentField)
                     {
-                        optFields.Add(currentField);
+                        if (i > 0 && instrs[i - 1].opcode == System.Reflection.Emit.OpCodes.Ldnull)
+                        {
+                            optFields.Add(currentField);
+                        }
                         currentField = null;
                     }
                 }
             }
             catch (Exception ex)
             {
-                Puts($"Error detecting optional fields: {ex.Message}");
+                Puts($"Error detecting optional fields in ResetToPool for {type.Name}: {ex.Message}");
             }
 
+            foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (field.FieldType.IsClass || 
+                    field.FieldType.IsInterface || 
+                    Nullable.GetUnderlyingType(field.FieldType) != null || 
+                    field.FieldType.IsGenericType || 
+                    field.FieldType.IsArray)
+                {
+                    optFields.Add(field.Name);
+                }
+            }
+
+            optFields.Remove("ShouldPool");
+
             return optFields;
+        }
+
+        HashSet<string> FindRequiredFields(Type type)
+        {
+            var requiredFields = new HashSet<string>();
+            
+            var serMethod = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "Serialize" && 
+                                   m.GetParameters().Any(p => p.ParameterType.Name.Contains("BufferStream")));
+            
+            if (serMethod == null)
+                return requiredFields;
+                
+            try
+            {
+                var instrs = PatchProcessor.GetCurrentInstructions(serMethod);
+                var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                    .ToDictionary(f => f.Name, f => f);
+                
+                string currentField = null;
+                bool inThrowBlock = false;
+                bool hasRequiredMessage = false;
+                
+                for (int i = 0; i < instrs.Count; i++)
+                {
+                    var instr = instrs[i];
+                    
+                    if (instr.opcode == System.Reflection.Emit.OpCodes.Ldarg_0 && i + 1 < instrs.Count)
+                    {
+                        if (instrs[i + 1].opcode == System.Reflection.Emit.OpCodes.Ldfld &&
+                            instrs[i + 1].operand is FieldInfo fieldInfo && 
+                            fields.ContainsKey(fieldInfo.Name))
+                        {
+                            currentField = fieldInfo.Name;
+                        }
+                    }
+                    
+                    if (currentField != null && 
+                        (instr.opcode == System.Reflection.Emit.OpCodes.Brfalse || 
+                         instr.opcode == System.Reflection.Emit.OpCodes.Brfalse_S ||
+                         instr.opcode == System.Reflection.Emit.OpCodes.Brtrue ||
+                         instr.opcode == System.Reflection.Emit.OpCodes.Brtrue_S))
+                    {
+                        inThrowBlock = true;
+                    }
+                    
+                    if (inThrowBlock && instr.opcode == System.Reflection.Emit.OpCodes.Ldstr)
+                    {
+                        string stringOperand = instr.operand as string;
+                        if (stringOperand != null && 
+                             stringOperand.Contains("Required by proto"))
+                        {
+                            hasRequiredMessage = true;
+                        }
+                    }
+                    
+                    if (inThrowBlock && (
+                        instr.opcode == System.Reflection.Emit.OpCodes.Throw ||
+                        (instr.opcode == System.Reflection.Emit.OpCodes.Newobj && 
+                         instr.operand is ConstructorInfo ctor && 
+                         (ctor.DeclaringType.Name.Contains("ArgumentException") || 
+                          ctor.DeclaringType.Name.Contains("NullReferenceException") ||
+                          ctor.DeclaringType.Name.Contains("Exception")))))
+                    {
+                        if (currentField != null && (hasRequiredMessage || 
+                            (instr.opcode == System.Reflection.Emit.OpCodes.Newobj && 
+                             instr.operand is ConstructorInfo ctorCheck && 
+                             ctorCheck.DeclaringType.Name.Contains("ArgumentNullException"))))
+                        {
+                            requiredFields.Add(currentField);
+                        }
+                        inThrowBlock = false;
+                        hasRequiredMessage = false;
+                        currentField = null;
+                    }
+                    
+                    if (instr.opcode == System.Reflection.Emit.OpCodes.Call || 
+                        instr.opcode == System.Reflection.Emit.OpCodes.Callvirt ||
+                        (instr.opcode.Name.StartsWith("br") && 
+                         !instr.opcode.Name.StartsWith("brfalse") && 
+                         !instr.opcode.Name.StartsWith("brtrue")))
+                    {
+                        inThrowBlock = false;
+                        hasRequiredMessage = false;
+                        currentField = null;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Puts($"Error detecting required fields in Serialize for {type.Name}: {ex.Message}");
+            }
+            
+            return requiredFields;
         }
 
         string MapType(Type type, Type parent)
@@ -314,16 +473,10 @@ namespace Oxide.Plugins
                 return $"repeated {MapType(elemType, parent)}";
             }
 
-            if (type == typeof(int)) return "int32";
-            else if (type == typeof(long)) return "int64";
-            else if (type == typeof(uint)) return "uint32";
-            else if (type == typeof(ulong)) return "uint64";
-            else if (type == typeof(float)) return "float";
-            else if (type == typeof(double)) return "double";
-            else if (type == typeof(bool)) return "bool";
-            else if (type == typeof(string)) return "string";
-            else if (type == typeof(byte[])) return "bytes";
-            else if (type == typeof(ArraySegment<byte>)) return "bytes";
+            if (typeMap.TryGetValue(type, out string protoType))
+            {
+                return protoType;
+            }
 
             if (type.Namespace == "ProtoBuf" ||
                 type.GetInterfaces().Any(i => i.Name == "IProto" || i.Name == "IProto`1") ||
@@ -357,7 +510,7 @@ namespace Oxide.Plugins
                 return type.Name;
             }
 
-            return "string";
+            return "Unknown:" + type.FullName;
         }
     }
 }

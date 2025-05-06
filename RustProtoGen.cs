@@ -287,6 +287,22 @@ namespace Oxide.Plugins
             var values = Enum.GetValues(type).Cast<int>().ToArray();
             
             Puts($"Found {names.Length} values in enum {type.Name}");
+            
+            bool hasZeroValue = false;
+            for (int i = 0; i < values.Length; i++)
+            {
+                if (values[i] == 0)
+                {
+                    hasZeroValue = true;
+                    break;
+                }
+            }
+            
+            if (!hasZeroValue)
+            {
+                sb.AppendLine($"{indentStr}\tUndefined = 0;");
+            }
+            
             for (int i = 0; i < names.Length; i++)
             {
                 sb.AppendLine($"{indentStr}\t{names[i]} = {values[i]};");

@@ -228,7 +228,7 @@ namespace Oxide.Plugins
                 .ToList();
 
             var optionalFields = DetectOptionalFields(type);
-            var requiredFields = FindRequiredFields(type);
+            var (requiredFields, fieldNumbers) = ParseSerializeFunction(type);
             
             Puts($"Found {members.Count} members in {type.Name}");
             
@@ -238,8 +238,16 @@ namespace Oxide.Plugins
                 var protoType = MapType(mem.Type, type);
                 bool isOpt = optionalFields.Contains(mem.Name) && !requiredFields.Contains(mem.Name);
                 string opt = isOpt ? "optional " : "";
-                sb.AppendLine($"{indentStr}\t{opt}{protoType} {mem.Name} = {fieldNum};");
-                fieldNum++;
+
+                if (!fieldNumbers.ContainsKey(mem.Name))
+                {
+                    Puts($"Field {mem.Name} not found in fieldNumbers");
+                    sb.AppendLine($"{indentStr}\t{opt}{protoType} {mem.Name} = ERROR;");
+                }
+                else
+                {
+                    sb.AppendLine($"{indentStr}\t{opt}{protoType} {mem.Name} = {fieldNumbers[mem.Name]};");
+                }
             }
 
             var nested = type.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
@@ -369,29 +377,29 @@ namespace Oxide.Plugins
             return optFields;
         }
 
-        HashSet<string> FindRequiredFields(Type type)
+        (HashSet<string>, Dictionary<string, int>) ParseSerializeFunction(Type type)
         {
             var requiredFields = new HashSet<string>();
-            
+            var fieldNumbers = new Dictionary<string, int>();
             var serializeMethods = new List<MethodInfo>();
             
             var instanceMethod = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
                 .FirstOrDefault(m => m.Name == "Serialize" && 
-                                  m.GetParameters().Any(p => p.ParameterType.Name.Contains("BufferStream")));
+                                m.GetParameters().Any(p => p.ParameterType.Name.Contains("BufferStream")));
             if (instanceMethod != null)
                 serializeMethods.Add(instanceMethod);
             
             var staticMethods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .Where(m => m.Name == "Serialize" && 
-                         m.GetParameters().Length >= 2 &&
-                         m.GetParameters()[0].ParameterType.Name.Contains("BufferStream") &&
-                         m.GetParameters()[1].ParameterType == type)
+                        m.GetParameters().Length >= 2 &&
+                        m.GetParameters()[0].ParameterType.Name.Contains("BufferStream") &&
+                        m.GetParameters()[1].ParameterType == type)
                 .ToList();
             if (staticMethods.Any())
                 serializeMethods.AddRange(staticMethods);
                 
             if (!serializeMethods.Any())
-                return requiredFields;
+                return (requiredFields, fieldNumbers);
                 
             foreach (var serMethod in serializeMethods)
             {
@@ -401,9 +409,33 @@ namespace Oxide.Plugins
                     if (instrs == null || instrs.Count == 0)
                         continue;
                     
+                    bool lookingForWriteByte = true;
+                    bool lookingForFieldName = false;
+                    int byteValue = 0;
+                    string pendingFieldName = null;
+                    
                     for (int i = 0; i < instrs.Count; i++)
                     {
                         var instr = instrs[i];
+                        
+                        if (instr.opcode == System.Reflection.Emit.OpCodes.Ldarg_1 || 
+                            instr.opcode == System.Reflection.Emit.OpCodes.Ldarg_0)
+                        {
+                            if (i + 1 < instrs.Count && 
+                                instrs[i + 1].opcode == System.Reflection.Emit.OpCodes.Ldfld && 
+                                instrs[i + 1].operand is FieldInfo fieldInfo)
+                            {
+                                if (lookingForFieldName && byteValue != 0) {                          
+                                    fieldNumbers[fieldInfo.Name] = byteValue;
+                                    byteValue = 0;
+                                    lookingForFieldName = false;
+                                }
+                                
+                                pendingFieldName = fieldInfo.Name;
+                                i++;
+                            }
+                        }
+                        
                         if (instr.opcode == System.Reflection.Emit.OpCodes.Newobj && 
                             instr.operand is ConstructorInfo ctor && 
                             ctor.DeclaringType.Name == "ArgumentNullException")
@@ -435,6 +467,90 @@ namespace Oxide.Plugins
                                 requiredFields.Add(fieldName);
                             }
                         }
+                        
+                        if (IsLoadConstantInstruction(instr, out int constValue))
+                        {
+                            if (i + 1 < instrs.Count && 
+                                IsMethodCallInstruction(instrs[i + 1], "WriteByte"))
+                            {
+                                if (lookingForWriteByte) {
+                                    byteValue = constValue >> 3;
+                                    lookingForWriteByte = false;
+                                    lookingForFieldName = true;
+                                    
+                                    if (pendingFieldName != null && !fieldNumbers.ContainsKey(pendingFieldName))
+                                    {
+                                        fieldNumbers[pendingFieldName] = byteValue;
+                                        pendingFieldName = null;
+                                    }
+                                    
+                                    for (int j = i + 2; j < Math.Min(instrs.Count, i + 10); j++)
+                                    {
+                                        if (instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldfld && 
+                                            instrs[j].operand is FieldInfo nextField)
+                                        {
+                                            if (!fieldNumbers.ContainsKey(nextField.Name))
+                                            {
+                                                fieldNumbers[nextField.Name] = byteValue;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    
+                                    i++;
+                                } else if (byteValue != 0) {
+                                    byteValue *= constValue;
+                                }
+                            }
+                        }
+
+                        if (!lookingForWriteByte) {
+                            if (instr.operand is MethodInfo protoMethod && 
+                                (protoMethod.DeclaringType?.Name == "ProtocolParser" || 
+                                 protoMethod.Name == "Serialize"))
+                            {
+                                string fieldName = ExtractFieldNameFromInstructions(instrs, i - 1, 5);
+                                
+                                if (fieldName == null && protoMethod.GetParameters().Length >= 2)
+                                {
+                                    bool foundStream = false;
+                                    
+                                    for (int j = i - 5; j < i; j++)
+                                    {
+                                        if (j < 0) continue;
+                                        
+                                        if (!foundStream && 
+                                            (instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldloc || 
+                                             instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldloc_0 ||
+                                             instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldloc_1))
+                                        {
+                                            foundStream = true;
+                                        }
+                                        else if (foundStream && instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldfld &&
+                                                 instrs[j].operand is FieldInfo argField)
+                                        {
+                                            fieldName = argField.Name;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if (fieldName != null && byteValue != 0 && !fieldNumbers.ContainsKey(fieldName))
+                                {
+                                    fieldNumbers[fieldName] = byteValue;
+                                }
+                                
+                                if (protoMethod.Name.StartsWith("Write") || 
+                                    protoMethod.Name == "Serialize")
+                                {
+                                    lookingForWriteByte = true;
+                                }
+                            }
+                            else if (i - 5 > 0 && !ContainsFieldAccess(instrs, i - 5, i))
+                            {
+                                lookingForWriteByte = true;
+                            }
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -443,7 +559,70 @@ namespace Oxide.Plugins
                 }
             }
             
-            return requiredFields;
+            return (requiredFields, fieldNumbers);
+        }
+
+        private bool IsLoadConstantInstruction(CodeInstruction instr, out int value)
+        {
+            value = 0;
+            
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_0) { value = 0; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_1) { value = 1; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_2) { value = 2; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_3) { value = 3; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_4) { value = 4; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_5) { value = 5; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_6) { value = 6; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_7) { value = 7; return true; }
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_8) { value = 8; return true; }
+            
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4_S && instr.operand is sbyte sb)
+            {
+                value = sb;
+                return true;
+            }
+            
+            if (instr.opcode == System.Reflection.Emit.OpCodes.Ldc_I4 && instr.operand is int i)
+            {
+                value = i;
+                return true;
+            }
+            
+            return false;
+        }
+
+        private bool IsMethodCallInstruction(CodeInstruction instr, string methodName)
+        {
+            return (instr.opcode == System.Reflection.Emit.OpCodes.Call || 
+                    instr.opcode == System.Reflection.Emit.OpCodes.Callvirt) &&
+                instr.operand is MethodInfo method && 
+                method.Name == methodName;
+        }
+
+        private string ExtractFieldNameFromInstructions(List<CodeInstruction> instrs, int startIndex, int lookBack = 10)
+        {
+            for (int j = startIndex; j >= Math.Max(0, startIndex - lookBack); j--)
+            {
+                if (instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldfld && 
+                    instrs[j].operand is FieldInfo accessedField)
+                {
+                    return accessedField.Name;
+                }
+            }
+            return null;
+        }
+
+        private bool ContainsFieldAccess(List<CodeInstruction> instrs, int startIndex, int endIndex)
+        {
+            for (int j = startIndex; j <= endIndex && j < instrs.Count; j++)
+            {
+                if (instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldfld || 
+                    instrs[j].opcode == System.Reflection.Emit.OpCodes.Ldflda)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         string MapType(Type type, Type parent)

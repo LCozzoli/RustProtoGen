@@ -29,35 +29,35 @@ message AppRequest {
 	uint64 playerId = 2;
 	int32 playerToken = 3;
 	uint32 entityId = 4;
-	optional AppEmpty getInfo = 5;
-	optional AppEmpty getTime = 6;
-	optional AppEmpty getMap = 7;
-	optional AppEmpty getTeamInfo = 8;
-	optional AppEmpty getTeamChat = 9;
-	optional AppSendMessage sendTeamMessage = 10;
-	optional AppEmpty getEntityInfo = 11;
-	optional AppSetEntityValue setEntityValue = 12;
-	optional AppEmpty checkSubscription = 13;
-	optional AppFlag setSubscription = 14;
-	optional AppEmpty getMapMarkers = 15;
-	optional AppPromoteToLeader promoteToLeader = 16;
-	optional AppEmpty getClanInfo = 17;
-	optional AppSendMessage setClanMotd = 18;
-	optional AppEmpty getClanChat = 19;
-	optional AppSendMessage sendClanMessage = 20;
-	optional AppGetNexusAuth getNexusAuth = 21;
-	optional AppCameraSubscribe cameraSubscribe = 22;
-	optional AppEmpty cameraUnsubscribe = 23;
-	optional AppCameraInput cameraInput = 24;
+	optional AppEmpty getInfo = 8;
+	optional AppEmpty getTime = 9;
+	optional AppEmpty getMap = 10;
+	optional AppEmpty getTeamInfo = 11;
+	optional AppEmpty getTeamChat = 12;
+	optional AppSendMessage sendTeamMessage = 13;
+	optional AppEmpty getEntityInfo = 14;
+	optional AppSetEntityValue setEntityValue = 15;
+	optional AppEmpty checkSubscription = 16;
+	optional AppFlag setSubscription = 17;
+	optional AppEmpty getMapMarkers = 18;
+	optional AppPromoteToLeader promoteToLeader = 20;
+	optional AppEmpty getClanInfo = 21;
+	optional AppSendMessage setClanMotd = 22;
+	optional AppEmpty getClanChat = 23;
+	optional AppSendMessage sendClanMessage = 24;
+	optional AppGetNexusAuth getNexusAuth = 25;
+	optional AppCameraSubscribe cameraSubscribe = 30;
+	optional AppEmpty cameraUnsubscribe = 31;
+	optional AppCameraInput cameraInput = 32;
 }
 
 message AppBroadcast {
-	optional AppTeamChanged teamChanged = 1;
-	optional AppNewTeamMessage teamMessage = 2;
-	optional AppEntityChanged entityChanged = 3;
-	optional AppClanChanged clanChanged = 4;
-	optional AppNewClanMessage clanMessage = 5;
-	optional AppCameraRays cameraRays = 6;
+	optional AppTeamChanged teamChanged = 4;
+	optional AppNewTeamMessage teamMessage = 5;
+	optional AppEntityChanged entityChanged = 6;
+	optional AppClanChanged clanChanged = 7;
+	optional AppNewClanMessage clanMessage = 8;
+	optional AppCameraRays cameraRays = 10;
 }
 
 message AppCameraInfo {
@@ -130,7 +130,7 @@ message AppEntityChanged {
 
 message AppEntityInfo {
 	AppEntityType type = 1;
-	AppEntityPayload payload = 2;
+	AppEntityPayload payload = 3;
 }
 
 message AppEntityPayload {
@@ -266,20 +266,20 @@ message AppPromoteToLeader {
 
 message AppResponse {
 	uint32 seq = 1;
-	optional AppSuccess success = 2;
-	optional AppError error = 3;
-	optional AppInfo info = 4;
-	optional AppTime time = 5;
-	optional AppMap map = 6;
-	optional AppTeamInfo teamInfo = 7;
-	optional AppTeamChat teamChat = 8;
-	optional AppEntityInfo entityInfo = 9;
-	optional AppFlag flag = 10;
-	optional AppMapMarkers mapMarkers = 11;
-	optional AppClanInfo clanInfo = 12;
-	optional AppClanChat clanChat = 13;
-	optional AppNexusAuth nexusAuth = 14;
-	optional AppCameraInfo cameraSubscribeInfo = 15;
+	optional AppSuccess success = 4;
+	optional AppError error = 5;
+	optional AppInfo info = 6;
+	optional AppTime time = 7;
+	optional AppMap map = 8;
+	optional AppTeamInfo teamInfo = 9;
+	optional AppTeamChat teamChat = 10;
+	optional AppEntityInfo entityInfo = 11;
+	optional AppFlag flag = 12;
+	optional AppMapMarkers mapMarkers = 13;
+	optional AppClanInfo clanInfo = 15;
+	optional AppClanChat clanChat = 16;
+	optional AppNexusAuth nexusAuth = 17;
+	optional AppCameraInfo cameraSubscribeInfo = 20;
 }
 
 message AppSendMessage {
@@ -320,12 +320,12 @@ message AppTeamInfo {
 	}
 
 	message Note {
-		int32 type = 1;
-		float x = 2;
-		float y = 3;
-		int32 icon = 4;
-		int32 colourIndex = 5;
-		string label = 6;
+		int32 type = 2;
+		float x = 3;
+		float y = 4;
+		int32 icon = 5;
+		int32 colourIndex = 6;
+		string label = 7;
 	}
 }
 
